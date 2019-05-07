@@ -49,7 +49,7 @@ func (MetadataStream) TableName() string {
 type Record struct {
 	Key       string `gorm:"primary_key"`       // Primary key (token+version)
 	Token     string `gorm:"not null;size:64"`  // Censorship token
-	Version   string `gorm:"not null"`          // Version of files
+	Version   uint64 `gorm:"not null"`          // Version of files
 	Status    int    `gorm:"not null"`          // Current status
 	Timestamp int64  `gorm:"not null"`          // UNIX timestamp of last updated
 	Merkle    string `gorm:"not null;size:64"`  // Merkle root of all files in record
@@ -64,8 +64,10 @@ func (Record) TableName() string {
 	return tableRecords
 }
 
-// Comment is a decred plugin comment, including all of the server side
+// Comment represents a record comment, including all of the server side
 // metadata.
+//
+// This is a decred plugin model.
 type Comment struct {
 	Key       string `gorm:"primary_key"`       // Primary key (token+commentID)
 	Token     string `gorm:"not null;size:64"`  // Censorship token
@@ -84,8 +86,10 @@ func (Comment) TableName() string {
 	return tableComments
 }
 
-// LikeComment is a decred plugin comment upvote/downvote.  The server side
-// metadata is not included.
+// LikeComment describes a comment upvote/downvote.  The server side metadata
+// is not included.
+//
+// This is a decred plugin model.
 type LikeComment struct {
 	Key       uint   `gorm:"primary_key"`       // Primary key
 	Token     string `gorm:"not null;size:64"`  // Censorship token
@@ -100,13 +104,14 @@ func (LikeComment) TableName() string {
 	return tableCommentLikes
 }
 
-// AuthorizeVote is a decred plugin metadata stream that is created by a
-// proposal author and is used to indicate that the proposal has been finalized
-// and is ready to be voted on.
+// AuthorizeVote is used to indicate that a record has been finalized and is
+// ready to be voted on.
+//
+// This is a decred plugin model.
 type AuthorizeVote struct {
 	Key       string `gorm:"primary_key"`       // Primary key (token+version)
 	Token     string `gorm:"not null;size:64"`  // Censorship token
-	Version   string `gorm:"not null"`          // Version of files
+	Version   uint64 `gorm:"not null"`          // Version of files
 	Action    string `gorm:"not null"`          // Authorize or revoke
 	Signature string `gorm:"not null;size:128"` // Signature of token+version+action
 	PublicKey string `gorm:"not null;size:64"`  // Pubkey used for signature
@@ -119,7 +124,9 @@ func (AuthorizeVote) TableName() string {
 	return tableAuthorizeVotes
 }
 
-// VoteOption is a decred plugin struct that describes a single vote option.
+// VoteOption describes a single vote option.
+//
+// This is a decred plugin model.
 type VoteOption struct {
 	Key         uint   `gorm:"primary_key"`      // Primary key
 	Token       string `gorm:"not null;size:64"` // StartVote foreign key
@@ -133,22 +140,24 @@ func (VoteOption) TableName() string {
 	return tableVoteOptions
 }
 
-// StartVote is a decred plugin struct that is used to record the details of
-// a proposal vote.
+// StartVote records the details of a proposal vote.
+//
+// This is a decred plugin model.
 type StartVote struct {
-	Token            string       `gorm:"primary_key;size:64"` // Censorship token
-	Version          string       `gorm:"not null"`            // Version of files
-	Mask             uint64       `gorm:"not null"`            // Valid votebits
-	Duration         uint32       `gorm:"not null"`            // Duration in blocks
-	QuorumPercentage uint32       `gorm:"not null"`            // Percent of eligible votes required for quorum
-	PassPercentage   uint32       `gorm:"not null"`            // Percent of total votes required to pass
-	Options          []VoteOption `gorm:"foreignkey:Token"`    // Vote option
-	PublicKey        string       `gorm:"not null;size:64"`    // Key used for signature
-	Signature        string       `gorm:"not null;size:128"`   // Signature of Votehash
-	StartBlockHeight string       `gorm:"not null"`            // Block height
-	StartBlockHash   string       `gorm:"not null"`            // Block hash
-	EndHeight        string       `gorm:"not null"`            // Height of vote end
-	EligibleTickets  string       `gorm:"not null"`            // Valid voting tickets
+	Token               string       `gorm:"primary_key;size:64"` // Censorship token
+	Version             uint64       `gorm:"not null"`            // Version of files
+	Mask                uint64       `gorm:"not null"`            // Valid votebits
+	Duration            uint32       `gorm:"not null"`            // Duration in blocks
+	QuorumPercentage    uint32       `gorm:"not null"`            // Percent of eligible votes required for quorum
+	PassPercentage      uint32       `gorm:"not null"`            // Percent of total votes required to pass
+	Options             []VoteOption `gorm:"foreignkey:Token"`    // Vote option
+	PublicKey           string       `gorm:"not null;size:64"`    // Key used for signature
+	Signature           string       `gorm:"not null;size:128"`   // Signature of Votehash
+	StartBlockHeight    string       `gorm:"not null"`            // Block height
+	StartBlockHash      string       `gorm:"not null"`            // Block hash
+	EndHeight           uint64       `gorm:"not null"`            // Height of vote end
+	EligibleTickets     string       `gorm:"not null"`            // Valid voting tickets
+	EligibleTicketCount int          `gorm:"not null"`            // Number of eligible tickets
 }
 
 // TableName returns the name of the StartVote database table.
@@ -156,16 +165,54 @@ func (StartVote) TableName() string {
 	return tableStartVotes
 }
 
-// CastVote is a decred plugin struct that is used to record a signed vote.
+// CastVote records a signed vote.
+//
+// This is a decred plugin model.
 type CastVote struct {
 	Key       uint   `gorm:"primary_key"`       // Primary key
 	Token     string `gorm:"not null;size:64"`  // Censorship token
 	Ticket    string `gorm:"not null"`          // Ticket ID
-	VoteBit   string `gorm:"not null"`          // Vote bit that was selected, this is encode in hex
+	VoteBit   string `gorm:"not null"`          // Hex encoded vote bit that was selected
 	Signature string `gorm:"not null;size:130"` // Signature of Token+Ticket+VoteBit
+
+	// TokenVoteBit is the Token+VoteBit. Indexing TokenVoteBit allows
+	// for quick lookups of the number of votes cast for each vote bit.
+	TokenVoteBit string `gorm:"no null;index"`
 }
 
 // TableName returns the name of the CastVote database table.
 func (CastVote) TableName() string {
 	return tableCastVotes
+}
+
+// VoteOptionResults records the vote result for a vote option. A
+// VoteOptionResult should only be created once the proposal vote has finished.
+//
+// This is a decred plugin model.
+type VoteOptionResult struct {
+	Key    string     `gorm:"primary_key"`      // Primary key (token+votebit)
+	Token  string     `gorm:"not null;size:64"` // Censorship token (VoteResults foreign key)
+	Votes  uint64     `gorm:"not null"`         // Number of votes cast for this option
+	Option VoteOption `gorm:"not null"`         // Vote option
+}
+
+// TableName returns the name of the VoteOptionResult database table.
+func (VoteOptionResult) TableName() string {
+	return tableVoteOptionResults
+}
+
+// VoteResults records the tallied vote results for a proposal and whether the
+// vote was approved/rejected.  A vote result entry should only be created once
+// the voting period has ended.  The vote results table is lazy loaded.
+//
+// This is a decred plugin model.
+type VoteResults struct {
+	Token    string             `gorm:"primary_key;size:64"` // Censorship token
+	Approved bool               `gorm:"not null"`            // Vote was approved
+	Results  []VoteOptionResult `gorm:"foreignkey:Token"`    // Results for the vote options
+}
+
+// TableName returns the name of the VoteResults database table.
+func (VoteResults) TableName() string {
+	return tableVoteResults
 }

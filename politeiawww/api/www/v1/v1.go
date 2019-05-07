@@ -17,10 +17,16 @@ const (
 	CsrfToken = "X-CSRF-Token"    // CSRF token for replies
 	Forward   = "X-Forwarded-For" // Proxy header
 
+	RouteVersion                  = "/version"
+	RoutePolicy                   = "/policy"
+	RouteSecret                   = "/secret"
+	RouteLogin                    = "/login"
+	RouteLogout                   = "/logout"
 	RouteUserMe                   = "/user/me"
+	RouteUserDetails              = "/user/{userid:[0-9a-zA-Z-]{36}}"
 	RouteNewUser                  = "/user/new"
-	RouteVerifyNewUser            = "/user/verify"
 	RouteResendVerification       = "/user/new/resend"
+	RouteVerifyNewUser            = "/user/verify"
 	RouteUpdateUserKey            = "/user/key"
 	RouteVerifyUpdateUserKey      = "/user/key/verify"
 	RouteChangeUsername           = "/user/username/change"
@@ -31,35 +37,30 @@ const (
 	RouteUserCommentsLikes        = "/user/proposals/{token:[A-z0-9]{64}}/commentslikes"
 	RouteVerifyUserPayment        = "/user/verifypayment"
 	RouteUserPaymentsRescan       = "/user/payments/rescan"
-	RouteUserDetails              = "/user/{userid:[0-9a-zA-Z-]{36}}"
 	RouteManageUser               = "/user/manage"
 	RouteEditUser                 = "/user/edit"
 	RouteUsers                    = "/users"
-	RouteLogin                    = "/login"
-	RouteLogout                   = "/logout"
-	RouteSecret                   = "/secret"
-	RouteProposalPaywallDetails   = "/proposals/paywall"
-	RouteProposalPaywallPayment   = "/proposals/paywallpayment"
+	RouteTokenInventory           = "/proposals/tokeninventory"
 	RouteAllVetted                = "/proposals/vetted"
 	RouteAllUnvetted              = "/proposals/unvetted"
 	RouteNewProposal              = "/proposals/new"
 	RouteEditProposal             = "/proposals/edit"
-	RouteProposalDetails          = "/proposals/{token:[A-z0-9]{64}}"
-	RouteSetProposalStatus        = "/proposals/{token:[A-z0-9]{64}}/status"
-	RoutePolicy                   = "/policy"
-	RouteVersion                  = "/version"
-	RouteNewComment               = "/comments/new"
-	RouteLikeComment              = "/comments/like"
-	RouteCensorComment            = "/comments/censor"
-	RouteCommentsGet              = "/proposals/{token:[A-z0-9]{64}}/comments"
 	RouteAuthorizeVote            = "/proposals/authorizevote"
 	RouteStartVote                = "/proposals/startvote"
 	RouteActiveVote               = "/proposals/activevote" // XXX rename to ActiveVotes
 	RouteCastVotes                = "/proposals/castvotes"
-	RouteVoteResults              = "/proposals/{token:[A-z0-9]{64}}/votes"
 	RouteAllVoteStatus            = "/proposals/votestatus"
-	RouteVoteStatus               = "/proposals/{token:[A-z0-9]{64}}/votestatus"
 	RoutePropsStats               = "/proposals/stats"
+	RouteProposalPaywallDetails   = "/proposals/paywall"
+	RouteProposalPaywallPayment   = "/proposals/paywallpayment"
+	RouteProposalDetails          = "/proposals/{token:[A-z0-9]{64}}"
+	RouteSetProposalStatus        = "/proposals/{token:[A-z0-9]{64}}/status"
+	RouteCommentsGet              = "/proposals/{token:[A-z0-9]{64}}/comments"
+	RouteVoteResults              = "/proposals/{token:[A-z0-9]{64}}/votes"
+	RouteVoteStatus               = "/proposals/{token:[A-z0-9]{64}}/votestatus"
+	RouteNewComment               = "/comments/new"
+	RouteLikeComment              = "/comments/like"
+	RouteCensorComment            = "/comments/censor"
 	RouteUnauthenticatedWebSocket = "/ws"
 	RouteAuthenticatedWebSocket   = "/aws"
 
@@ -174,6 +175,34 @@ const (
 	ErrorStatusInvalidUUID                 ErrorStatusT = 56
 	ErrorStatusInvalidLikeCommentAction    ErrorStatusT = 57
 	ErrorStatusInvalidCensorshipToken      ErrorStatusT = 58
+	ErrorStatusEmailAlreadyVerified        ErrorStatusT = 59
+
+	// CMS Errors
+	ErrorStatusMalformedName                  ErrorStatusT = 60
+	ErrorStatusMalformedLocation              ErrorStatusT = 61
+	ErrorStatusInvoiceNotFound                ErrorStatusT = 62
+	ErrorStatusInvalidMonthYearRequest        ErrorStatusT = 63
+	ErrorStatusMalformedInvoiceFile           ErrorStatusT = 64
+	ErrorStatusInvalidInvoiceStatusTransition ErrorStatusT = 65
+	ErrorStatusReasonNotProvided              ErrorStatusT = 66
+	ErrorStatusInvoiceDuplicate               ErrorStatusT = 67
+	ErrorStatusInvalidPaymentAddress          ErrorStatusT = 68
+	ErrorStatusMalformedLineItem              ErrorStatusT = 69
+	ErrorStatusInvoiceMissingName             ErrorStatusT = 70
+	ErrorStatusInvoiceMissingLocation         ErrorStatusT = 71
+	ErrorStatusInvoiceMissingContact          ErrorStatusT = 72
+	ErrorStatusInvoiceMissingRate             ErrorStatusT = 73
+	ErrorStatusInvoiceInvalidRate             ErrorStatusT = 74
+	ErrorStatusInvoiceMalformedContact        ErrorStatusT = 75
+	ErrorStatusMalformedProposalToken         ErrorStatusT = 76
+	ErrorStatusMalformedDomain                ErrorStatusT = 77
+	ErrorStatusMalformedSubdomain             ErrorStatusT = 78
+	ErrorStatusMalformedDescription           ErrorStatusT = 79
+	ErrorStatusWrongInvoiceStatus             ErrorStatusT = 80
+	ErrorStatusInvoiceRequireLineItems        ErrorStatusT = 81
+	ErrorStatusMultipleInvoiceMonthYear       ErrorStatusT = 82
+	ErrorStatusInvalidInvoiceMonthYear        ErrorStatusT = 83
+	ErrorStatusInvalidExchangeRate            ErrorStatusT = 84
 
 	// Proposal state codes
 	//
@@ -256,65 +285,91 @@ var (
 
 	// ErrorStatus converts error status codes to human readable text.
 	ErrorStatus = map[ErrorStatusT]string{
-		ErrorStatusInvalid:                     "invalid error status",
-		ErrorStatusInvalidEmailOrPassword:      "invalid email or password",
-		ErrorStatusMalformedEmail:              "malformed email",
-		ErrorStatusVerificationTokenInvalid:    "invalid verification token",
-		ErrorStatusVerificationTokenExpired:    "expired verification token",
-		ErrorStatusProposalMissingFiles:        "missing proposal files",
-		ErrorStatusProposalNotFound:            "proposal not found",
-		ErrorStatusProposalDuplicateFilenames:  "duplicate proposal files",
-		ErrorStatusProposalInvalidTitle:        "invalid proposal title",
-		ErrorStatusMaxMDsExceededPolicy:        "maximum markdown files exceeded",
-		ErrorStatusMaxImagesExceededPolicy:     "maximum image files exceeded",
-		ErrorStatusMaxMDSizeExceededPolicy:     "maximum markdown file size exceeded",
-		ErrorStatusMaxImageSizeExceededPolicy:  "maximum image file size exceeded",
-		ErrorStatusMalformedPassword:           "malformed password",
-		ErrorStatusCommentNotFound:             "comment not found",
-		ErrorStatusInvalidFilename:             "invalid filename",
-		ErrorStatusInvalidFileDigest:           "invalid file digest",
-		ErrorStatusInvalidBase64:               "invalid base64 file content",
-		ErrorStatusInvalidMIMEType:             "invalid MIME type detected for file",
-		ErrorStatusUnsupportedMIMEType:         "unsupported MIME type for file",
-		ErrorStatusInvalidPropStatusTransition: "invalid proposal status",
-		ErrorStatusInvalidPublicKey:            "invalid public key",
-		ErrorStatusNoPublicKey:                 "no active public key",
-		ErrorStatusInvalidSignature:            "invalid signature",
-		ErrorStatusInvalidInput:                "invalid input",
-		ErrorStatusInvalidSigningKey:           "invalid signing key",
-		ErrorStatusCommentLengthExceededPolicy: "maximum comment length exceeded",
-		ErrorStatusUserNotFound:                "user not found",
-		ErrorStatusWrongStatus:                 "wrong status",
-		ErrorStatusNotLoggedIn:                 "user not logged in",
-		ErrorStatusUserNotPaid:                 "user hasn't paid paywall",
-		ErrorStatusReviewerAdminEqualsAuthor:   "user cannot change the status of his own proposal",
-		ErrorStatusMalformedUsername:           "malformed username",
-		ErrorStatusDuplicateUsername:           "duplicate username",
-		ErrorStatusVerificationTokenUnexpired:  "verification token not yet expired",
-		ErrorStatusCannotVerifyPayment:         "cannot verify payment at this time",
-		ErrorStatusDuplicatePublicKey:          "public key already taken by another user",
-		ErrorStatusInvalidPropVoteStatus:       "invalid proposal vote status",
-		ErrorStatusUserLocked:                  "user locked due to too many login attempts",
-		ErrorStatusNoProposalCredits:           "no proposal credits",
-		ErrorStatusInvalidUserManageAction:     "invalid user edit action",
-		ErrorStatusUserActionNotAllowed:        "user action is not allowed",
-		ErrorStatusWrongVoteStatus:             "wrong proposal vote status",
-		ErrorStatusCannotCommentOnProp:         "cannot comment on proposal",
-		ErrorStatusCannotVoteOnPropComment:     "cannot vote on proposal comment",
-		ErrorStatusChangeMessageCannotBeBlank:  "status change message cannot be blank",
-		ErrorStatusCensorReasonCannotBeBlank:   "censor comment reason cannot be blank",
-		ErrorStatusCannotCensorComment:         "cannot censor comment",
-		ErrorStatusUserNotAuthor:               "user is not the proposal author",
-		ErrorStatusVoteNotAuthorized:           "vote has not been authorized",
-		ErrorStatusVoteAlreadyAuthorized:       "vote has already been authorized",
-		ErrorStatusInvalidAuthVoteAction:       "invalid authorize vote action",
-		ErrorStatusUserDeactivated:             "user account is deactivated",
-		ErrorStatusInvalidPropVoteBits:         "invalid proposal vote option bits",
-		ErrorStatusInvalidPropVoteParams:       "invalid proposal vote parameters",
-		ErrorStatusEmailNotVerified:            "email address is not verified",
-		ErrorStatusInvalidUUID:                 "invalid user UUID",
-		ErrorStatusInvalidLikeCommentAction:    "invalid like comment action",
-		ErrorStatusInvalidCensorshipToken:      "invalid proposal censorship token",
+		ErrorStatusInvalid:                        "invalid error status",
+		ErrorStatusInvalidEmailOrPassword:         "invalid email or password",
+		ErrorStatusMalformedEmail:                 "malformed email",
+		ErrorStatusVerificationTokenInvalid:       "invalid verification token",
+		ErrorStatusVerificationTokenExpired:       "expired verification token",
+		ErrorStatusProposalMissingFiles:           "missing proposal files",
+		ErrorStatusProposalNotFound:               "proposal not found",
+		ErrorStatusProposalDuplicateFilenames:     "duplicate proposal files",
+		ErrorStatusProposalInvalidTitle:           "invalid proposal title",
+		ErrorStatusMaxMDsExceededPolicy:           "maximum markdown files exceeded",
+		ErrorStatusMaxImagesExceededPolicy:        "maximum image files exceeded",
+		ErrorStatusMaxMDSizeExceededPolicy:        "maximum markdown file size exceeded",
+		ErrorStatusMaxImageSizeExceededPolicy:     "maximum image file size exceeded",
+		ErrorStatusMalformedPassword:              "malformed password",
+		ErrorStatusCommentNotFound:                "comment not found",
+		ErrorStatusInvalidFilename:                "invalid filename",
+		ErrorStatusInvalidFileDigest:              "invalid file digest",
+		ErrorStatusInvalidBase64:                  "invalid base64 file content",
+		ErrorStatusInvalidMIMEType:                "invalid MIME type detected for file",
+		ErrorStatusUnsupportedMIMEType:            "unsupported MIME type for file",
+		ErrorStatusInvalidPropStatusTransition:    "invalid proposal status",
+		ErrorStatusInvalidPublicKey:               "invalid public key",
+		ErrorStatusNoPublicKey:                    "no active public key",
+		ErrorStatusInvalidSignature:               "invalid signature",
+		ErrorStatusInvalidInput:                   "invalid input",
+		ErrorStatusInvalidSigningKey:              "invalid signing key",
+		ErrorStatusCommentLengthExceededPolicy:    "maximum comment length exceeded",
+		ErrorStatusUserNotFound:                   "user not found",
+		ErrorStatusWrongStatus:                    "wrong status",
+		ErrorStatusNotLoggedIn:                    "user not logged in",
+		ErrorStatusUserNotPaid:                    "user hasn't paid paywall",
+		ErrorStatusReviewerAdminEqualsAuthor:      "user cannot change the status of his own proposal",
+		ErrorStatusMalformedUsername:              "malformed username",
+		ErrorStatusDuplicateUsername:              "duplicate username",
+		ErrorStatusVerificationTokenUnexpired:     "verification token not yet expired",
+		ErrorStatusCannotVerifyPayment:            "cannot verify payment at this time",
+		ErrorStatusDuplicatePublicKey:             "public key already taken by another user",
+		ErrorStatusInvalidPropVoteStatus:          "invalid proposal vote status",
+		ErrorStatusUserLocked:                     "user locked due to too many login attempts",
+		ErrorStatusNoProposalCredits:              "no proposal credits",
+		ErrorStatusInvalidUserManageAction:        "invalid user edit action",
+		ErrorStatusUserActionNotAllowed:           "user action is not allowed",
+		ErrorStatusWrongVoteStatus:                "wrong proposal vote status",
+		ErrorStatusCannotCommentOnProp:            "cannot comment on proposal",
+		ErrorStatusCannotVoteOnPropComment:        "cannot vote on proposal comment",
+		ErrorStatusChangeMessageCannotBeBlank:     "status change message cannot be blank",
+		ErrorStatusCensorReasonCannotBeBlank:      "censor comment reason cannot be blank",
+		ErrorStatusCannotCensorComment:            "cannot censor comment",
+		ErrorStatusUserNotAuthor:                  "user is not the proposal author",
+		ErrorStatusVoteNotAuthorized:              "vote has not been authorized",
+		ErrorStatusVoteAlreadyAuthorized:          "vote has already been authorized",
+		ErrorStatusInvalidAuthVoteAction:          "invalid authorize vote action",
+		ErrorStatusUserDeactivated:                "user account is deactivated",
+		ErrorStatusInvalidPropVoteBits:            "invalid proposal vote option bits",
+		ErrorStatusInvalidPropVoteParams:          "invalid proposal vote parameters",
+		ErrorStatusEmailNotVerified:               "email address is not verified",
+		ErrorStatusInvalidUUID:                    "invalid user UUID",
+		ErrorStatusInvalidLikeCommentAction:       "invalid like comment action",
+		ErrorStatusInvalidCensorshipToken:         "invalid proposal censorship token",
+		ErrorStatusEmailAlreadyVerified:           "email address is already verified",
+		ErrorStatusMalformedName:                  "malformed name",
+		ErrorStatusMalformedLocation:              "malformed location",
+		ErrorStatusInvoiceNotFound:                "invoice cannot be found",
+		ErrorStatusInvalidMonthYearRequest:        "month or year was set, while the other was not",
+		ErrorStatusInvalidInvoiceStatusTransition: "invalid invoice status transition",
+		ErrorStatusReasonNotProvided:              "reason for action not provided",
+		ErrorStatusMalformedInvoiceFile:           "submitted invoice file is malformed",
+		ErrorStatusInvoiceDuplicate:               "submitted invoice is a duplicate of an existing invoice",
+		ErrorStatusInvalidPaymentAddress:          "invalid payment address",
+		ErrorStatusMalformedLineItem:              "malformed line item submitted",
+		ErrorStatusInvoiceMissingName:             "invoice missing contractor name",
+		ErrorStatusInvoiceMissingLocation:         "invoice missing contractor location",
+		ErrorStatusInvoiceMissingContact:          "invoice missing contractor contact",
+		ErrorStatusInvoiceMalformedContact:        "invoice has malformed contractor contact",
+		ErrorStatusInvoiceMissingRate:             "invoice missing contractor rate",
+		ErrorStatusInvoiceInvalidRate:             "invoice has invalid contractor rate",
+		ErrorStatusMalformedProposalToken:         "line item has malformed proposal token",
+		ErrorStatusMalformedDomain:                "line item has malformed domain",
+		ErrorStatusMalformedSubdomain:             "line item has malformed subdomain",
+		ErrorStatusMalformedDescription:           "line item has malformed description",
+		ErrorStatusWrongInvoiceStatus:             "invoice is an wrong status to be editted (approved, rejected or paid)",
+		ErrorStatusInvoiceRequireLineItems:        "invoices require at least 1 line item",
+		ErrorStatusMultipleInvoiceMonthYear:       "only one invoice per month/year is allowed to be submitted",
+		ErrorStatusInvalidInvoiceMonthYear:        "an invalid month/year was submitted on an invoice",
+		ErrorStatusInvalidExchangeRate:            "exchange rate was invalid or didn't match expected result",
 	}
 
 	// PropStatus converts propsal status codes to human readable text
@@ -456,10 +511,12 @@ type Version struct{}
 // is running and additionally the route to the API and the public signing key of
 // the server.
 type VersionReply struct {
-	Version uint   `json:"version"` // politeia WWW API version
-	Route   string `json:"route"`   // prefix to API calls
-	PubKey  string `json:"pubkey"`  // Server public key
-	TestNet bool   `json:"testnet"` // Network indicator
+	Version           uint   `json:"version"`           // politeia WWW API version
+	Route             string `json:"route"`             // prefix to API calls
+	PubKey            string `json:"pubkey"`            // Server public key
+	TestNet           bool   `json:"testnet"`           // Network indicator
+	Mode              string `json:"mode"`              // current politeiawww mode running (piwww or cmswww)
+	ActiveUserSession bool   `json:"activeusersession"` // indicates if there is an active user session
 }
 
 // NewUser is used to request that a new user be created within the db.
@@ -616,21 +673,23 @@ type VerifyUserPaymentReply struct {
 
 // Users is used to request a list of users given a filter.
 type Users struct {
-	Username string `json:"username"` // String which should match or partially match a username
-	Email    string `json:"email"`    // String which should match or partially match an email
+	Username  string `json:"username"`  // String which should match or partially match a username
+	Email     string `json:"email"`     // String which should match or partially match an email
+	PublicKey string `json:"publickey"` // Active or inactive user pubkey
+
 }
 
 // UsersReply is a reply to the Users command, replying with a list of users.
 type UsersReply struct {
-	TotalUsers   uint64         `json:"totalusers"`   // Total number of all users in the database
-	TotalMatches uint64         `json:"totalmatches"` // Total number of users that match the filters
-	Users        []AbridgedUser `json:"users"`        // List of users that match the filters
+	TotalUsers   uint64         `json:"totalusers,omitempty"` // Total number of all users in the database
+	TotalMatches uint64         `json:"totalmatches"`         // Total number of users that match the filters
+	Users        []AbridgedUser `json:"users"`                // List of users that match the filters
 }
 
 // AbridgedUser is a shortened version of User that's used for the admin list.
 type AbridgedUser struct {
 	ID       string `json:"id"`
-	Email    string `json:"email"`
+	Email    string `json:"email,omitempty"`
 	Username string `json:"username"`
 }
 
@@ -682,7 +741,7 @@ type ProposalPaywallDetailsReply struct {
 }
 
 // ProposalPaywallPayment is used to request payment details for a pending
-// propsoal paywall payment.
+// proposal paywall payment.
 type ProposalPaywallPayment struct{}
 
 // ProposalPaywallPaymentReply is used to reply to the ProposalPaywallPayment
@@ -1112,6 +1171,23 @@ type ProposalsStatsReply struct {
 	NumOfUnvettedChanges int `json:"numofunvettedchanges"` // Counting number of proposals with unvetted changes
 	NumOfPublic          int `json:"numofpublic"`          // Counting number of public proposals
 	NumOfAbandoned       int `json:"numofabandoned"`       // Counting number of abandoned proposals
+}
+
+// TokenInventory retrieves the censorship record tokens of all proposals in
+// the inventory, categorized by stage of the voting process.
+type TokenInventory struct{}
+
+// TokenInventoryReply is used to reply to the TokenInventory command and
+// returns the tokens of all proposals in the inventory.  The tokens are
+// categorized by stage of the voting process.  Pre and abandoned tokens are
+// sorted by timestamp in decending order.  Active, approved, and rejected
+// tokens are sorted by voting period start block height in decending order.
+type TokenInventoryReply struct {
+	Pre       []string `json:"pre"`       // Tokens of all props that are pre-vote
+	Active    []string `json:"active"`    // Tokens of all props with an active voting period
+	Approved  []string `json:"approved"`  // Tokens of all props that have been approved by a vote
+	Rejected  []string `json:"rejected"`  // Tokens of all props that have been rejected by a vote
+	Abandoned []string `json:"abandoned"` // Tokens of all props that have been abandoned
 }
 
 // Websocket commands

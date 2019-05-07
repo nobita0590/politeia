@@ -9,14 +9,14 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/decred/politeia/politeiawww/api/v1"
+	"github.com/decred/politeia/politeiawww/api/www/v1"
 )
 
 // EditUserCmd edits the preferences of the logged in user.
 type EditUserCmd struct {
 	Args struct {
 		NotifType string `long:"emailnotifications"` // Email notification bit field
-	}
+	} `positional-args:"true" required:"true"`
 }
 
 // Execute executes the edit user command.

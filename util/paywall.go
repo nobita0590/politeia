@@ -28,10 +28,11 @@ import (
 const (
 	dcrdataMainnet = "https://explorer.dcrdata.org/api"
 	dcrdataTestnet = "https://testnet.dcrdata.org/api"
-	insightMainnet = "https://mainnet.decred.org/api"
-	insightTestnet = "https://testnet.decred.org/api"
+	insightMainnet = "https://mainnet.decred.org/insight/api"
+	insightTestnet = "https://testnet.decred.org/insight/api"
 
-	requestTimeout = 3 // Block explorer request timeout in seconds
+	dcrdataTimeout = 3 * time.Second // Dcrdata request timeout
+	faucetTimeout  = 5 * time.Second // Testnet faucet request timeout
 )
 
 // FaucetResponse represents the expected JSON response from the testnet faucet.
@@ -112,6 +113,16 @@ func makeRequest(url string, timeout time.Duration) ([]byte, error) {
 	}
 	defer response.Body.Close()
 
+	if response.StatusCode != http.StatusOK {
+		body, err := ioutil.ReadAll(response.Body)
+		if err != nil {
+			return nil, fmt.Errorf("dcrdata error: %v %v %v",
+				response.StatusCode, url, err)
+		}
+		return nil, fmt.Errorf("dcrdata error: %v %v %s",
+			response.StatusCode, url, body)
+	}
+
 	return ioutil.ReadAll(response.Body)
 }
 
@@ -172,7 +183,7 @@ func blockExplorerURLForAddress(address string, netParams *chaincfg.Params) (str
 }
 
 func fetchTxWithPrimaryBE(url string, address string, minimumAmount uint64, txnotbefore int64, minConfirmationsRequired uint64) (string, uint64, error) {
-	responseBody, err := makeRequest(url, requestTimeout)
+	responseBody, err := makeRequest(url, dcrdataTimeout)
 	if err != nil {
 		return "", 0, err
 	}
@@ -213,7 +224,7 @@ func fetchTxWithPrimaryBE(url string, address string, minimumAmount uint64, txno
 }
 
 func fetchTxWithBackupBE(url string, address string, minimumAmount uint64, txnotbefore int64, minConfirmationsRequired uint64) (string, uint64, error) {
-	responseBody, err := makeRequest(url, requestTimeout)
+	responseBody, err := makeRequest(url, dcrdataTimeout)
 	if err != nil {
 		return "", 0, err
 	}
@@ -294,9 +305,6 @@ func PayWithTestnetFaucet(faucetURL string, address string, amount uint64, overr
 
 	dcramount := strconv.FormatFloat(dcrutil.Amount(amount).ToCoin(),
 		'f', -1, 32)
-	if err != nil {
-		return "", fmt.Errorf("unable to process amount: %v", err)
-	}
 
 	// build request
 	form := url.Values{}
@@ -313,7 +321,7 @@ func PayWithTestnetFaucet(faucetURL string, address string, amount uint64, overr
 
 	// limit the time we take
 	ctx, cancel := context.WithTimeout(context.Background(),
-		2500*time.Millisecond)
+		faucetTimeout)
 	// it is good practice to use the cancellation function even with a timeout
 	defer cancel()
 	req = req.WithContext(ctx)
@@ -322,6 +330,16 @@ func PayWithTestnetFaucet(faucetURL string, address string, amount uint64, overr
 	resp, err := client.Do(req)
 	if err != nil {
 		return "", err
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		body, err := ioutil.ReadAll(resp.Body)
+		if err != nil {
+			return "", fmt.Errorf("testnet faucet error: %v %v %v",
+				resp.StatusCode, faucetURL, err)
+		}
+		return "", fmt.Errorf("testnet faucet error: %v %v %s",
+			resp.StatusCode, faucetURL, body)
 	}
 
 	if resp == nil {
@@ -387,7 +405,7 @@ func FetchTxWithBlockExplorers(address string, amount uint64, txnotbefore int64,
 }
 
 func fetchTxsWithPrimaryBE(url string) ([]BEPrimaryTransaction, error) {
-	responseBody, err := makeRequest(url, 3)
+	responseBody, err := makeRequest(url, dcrdataTimeout)
 	if err != nil {
 		return nil, err
 	}
@@ -402,7 +420,7 @@ func fetchTxsWithPrimaryBE(url string) ([]BEPrimaryTransaction, error) {
 }
 
 func fetchTxsWithBackupBE(url string) ([]BEBackupTransaction, error) {
-	responseBody, err := makeRequest(url, 3)
+	responseBody, err := makeRequest(url, dcrdataTimeout)
 	if err != nil {
 		return nil, err
 	}

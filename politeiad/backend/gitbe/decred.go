@@ -205,7 +205,7 @@ func getDecredPlugin(testnet bool) backend.Plugin {
 func (g *gitBackEnd) initDecredPluginJournals() error {
 	log.Infof("initDecredPlugin")
 
-	// check if backend journal is intialized
+	// check if backend journal is initialized
 	if g.journal == nil {
 		return fmt.Errorf("initDecredPlugin backend journal isn't initialized")
 	}
@@ -393,6 +393,16 @@ func bestBlock() (*dcrdataapi.BlockDataBasic, error) {
 	}
 	defer r.Body.Close()
 
+	if r.StatusCode != http.StatusOK {
+		body, err := ioutil.ReadAll(r.Body)
+		if err != nil {
+			return nil, fmt.Errorf("dcrdata error: %v %v %v",
+				r.StatusCode, url, err)
+		}
+		return nil, fmt.Errorf("dcrdata error: %v %v %s",
+			r.StatusCode, url, body)
+	}
+
 	var bdb dcrdataapi.BlockDataBasic
 	decoder := json.NewDecoder(r.Body)
 	if err := decoder.Decode(&bdb); err != nil {
@@ -412,6 +422,16 @@ func block(block uint32) (*dcrdataapi.BlockDataBasic, error) {
 	}
 	defer r.Body.Close()
 
+	if r.StatusCode != http.StatusOK {
+		body, err := ioutil.ReadAll(r.Body)
+		if err != nil {
+			return nil, fmt.Errorf("dcrdata error: %v %v %v",
+				r.StatusCode, url, err)
+		}
+		return nil, fmt.Errorf("dcrdata error: %v %v %s",
+			r.StatusCode, url, body)
+	}
+
 	var bdb dcrdataapi.BlockDataBasic
 	decoder := json.NewDecoder(r.Body)
 	if err := decoder.Decode(&bdb); err != nil {
@@ -430,6 +450,16 @@ func snapshot(hash string) ([]string, error) {
 		return nil, err
 	}
 	defer r.Body.Close()
+
+	if r.StatusCode != http.StatusOK {
+		body, err := ioutil.ReadAll(r.Body)
+		if err != nil {
+			return nil, fmt.Errorf("dcrdata error: %v %v %v",
+				r.StatusCode, url, err)
+		}
+		return nil, fmt.Errorf("dcrdata error: %v %v %s",
+			r.StatusCode, url, body)
+	}
 
 	var tickets []string
 	decoder := json.NewDecoder(r.Body)
@@ -460,10 +490,16 @@ func batchTransactions(hashes []string) ([]dcrdataapi.TrimmedTx, error) {
 	defer r.Body.Close()
 
 	if r.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("POST request failed: %d", r.StatusCode)
+		body, err := ioutil.ReadAll(r.Body)
+		if err != nil {
+			return nil, fmt.Errorf("dcrdata error: %v %v %v",
+				r.StatusCode, url, err)
+		}
+		return nil, fmt.Errorf("dcrdata error: %v %v %s",
+			r.StatusCode, url, body)
 	}
 
-	// Unmarshal the resonse
+	// Unmarshal the response
 	var ttx []dcrdataapi.TrimmedTx
 	decoder := json.NewDecoder(r.Body)
 	if err := decoder.Decode(&ttx); err != nil {
@@ -1627,7 +1663,7 @@ func (g *gitBackEnd) pluginStartVote(payload string) (string, error) {
 		return "", fmt.Errorf("snapshot %v", err)
 	}
 	if len(snapshot) == 0 {
-		return "", fmt.Errorf("no eligble voters for %v", token)
+		return "", fmt.Errorf("no eligible voters for %v", token)
 	}
 
 	// Make sure vote duration is within min/max range
@@ -2042,19 +2078,6 @@ func (g *gitBackEnd) pluginBallot(payload string) (string, error) {
 			continue
 		}
 
-		// Verify voting period has not ended
-		endHeight, err := g.voteEndHeight(v.Token)
-		if err != nil {
-			t := time.Now().Unix()
-			log.Errorf("pluginBallot: voteEndHeight failed %v %v: %v",
-				t, v.Token, err)
-			br.Receipts[k].Error = fmt.Sprintf("internal error %v", t)
-		}
-		if bb.Height > endHeight {
-			br.Receipts[k].Error = "vote has ended: " + v.Token
-			continue
-		}
-
 		// Replay individual votes journal
 		dup, err := g.voteExists(v)
 		if err != nil {
@@ -2082,6 +2105,21 @@ func (g *gitBackEnd) pluginBallot(payload string) (string, error) {
 				v.Ticket, v.Token, t, err)
 			br.Receipts[k].Error = fmt.Sprintf("internal error %v",
 				t)
+			continue
+		}
+
+		// Verify voting period has not ended
+		endHeight, err := g.voteEndHeight(v.Token)
+		if err != nil {
+			t := time.Now().Unix()
+			log.Errorf("pluginBallot: voteEndHeight %v %v %v %v",
+				v.Ticket, v.Token, t, err)
+			br.Receipts[k].Error = fmt.Sprintf("internal error %v",
+				t)
+			continue
+		}
+		if bb.Height >= endHeight {
+			br.Receipts[k].Error = "vote has ended: " + v.Token
 			continue
 		}
 
@@ -2498,4 +2536,15 @@ func (g *gitBackEnd) pluginInventory() (string, error) {
 	}
 
 	return string(payload), nil
+}
+
+// pluginLoadVoteResults is a pass through function. CmdLoadVoteResults does
+// not require any work to be performed in gitBackEnd.
+func (g *gitBackEnd) pluginLoadVoteResults() (string, error) {
+	r := decredplugin.LoadVoteResultsReply{}
+	reply, err := decredplugin.EncodeLoadVoteResultsReply(r)
+	if err != nil {
+		return "", err
+	}
+	return string(reply), nil
 }

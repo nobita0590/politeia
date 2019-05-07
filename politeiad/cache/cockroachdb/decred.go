@@ -6,9 +6,12 @@ package cockroachdb
 
 import (
 	"fmt"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/decred/politeia/decredplugin"
+	pd "github.com/decred/politeia/politeiad/api/v1"
 	"github.com/decred/politeia/politeiad/cache"
 	"github.com/jinzhu/gorm"
 )
@@ -17,15 +20,20 @@ const (
 	// decredVersion is the version of the cache implementation of
 	// decred plugin. This may differ from the decredplugin package
 	// version.
-	decredVersion = "1"
+	decredVersion = "1.1"
 
 	// Decred plugin table names
-	tableComments       = "comments"
-	tableCommentLikes   = "comment_likes"
-	tableCastVotes      = "cast_votes"
-	tableAuthorizeVotes = "authorize_votes"
-	tableVoteOptions    = "vote_options"
-	tableStartVotes     = "start_votes"
+	tableComments          = "comments"
+	tableCommentLikes      = "comment_likes"
+	tableCastVotes         = "cast_votes"
+	tableAuthorizeVotes    = "authorize_votes"
+	tableVoteOptions       = "vote_options"
+	tableStartVotes        = "start_votes"
+	tableVoteOptionResults = "vote_option_results"
+	tableVoteResults       = "vote_results"
+
+	// Vote option IDs
+	voteOptionIDApproved = "yes"
 )
 
 // decred implements the PluginDriver interface.
@@ -279,8 +287,14 @@ func (d *decred) cmdAuthorizeVote(cmdPayload, replyPayload string) (string, erro
 		return "", err
 	}
 
+	v, err := strconv.ParseUint(avr.RecordVersion, 10, 64)
+	if err != nil {
+		return "", fmt.Errorf("parse version '%v' failed: %v",
+			avr.RecordVersion, err)
+	}
+
 	// Run update in a transaction
-	a := convertAuthorizeVoteFromDecred(*av, *avr)
+	a := convertAuthorizeVoteFromDecred(*av, *avr, v)
 	tx := d.recordsdb.Begin()
 	err = d.newAuthorizeVote(tx, a)
 	if err != nil {
@@ -318,7 +332,13 @@ func (d *decred) cmdStartVote(cmdPayload, replyPayload string) (string, error) {
 		return "", err
 	}
 
-	s := convertStartVoteFromDecred(*sv, *svr)
+	endHeight, err := strconv.ParseUint(svr.EndHeight, 10, 64)
+	if err != nil {
+		return "", fmt.Errorf("parse end height '%v': %v",
+			svr.EndHeight, err)
+	}
+
+	s := convertStartVoteFromDecred(*sv, *svr, endHeight)
 	err = d.newStartVote(d.recordsdb, s)
 	if err != nil {
 		return "", err
@@ -354,8 +374,9 @@ func (d *decred) cmdVoteDetails(payload string) (string, error) {
 
 	// Lookup authorize vote
 	var av AuthorizeVote
+	key := vd.Token + strconv.FormatUint(r.Version, 10)
 	err = d.recordsdb.
-		Where("key = ?", vd.Token+r.Version).
+		Where("key = ?", key).
 		Find(&av).
 		Error
 	if err == gorm.ErrRecordNotFound {
@@ -517,6 +538,429 @@ func (d *decred) cmdInventory() (string, error) {
 	return string(irb), err
 }
 
+// newVoteResults creates a VoteResults record for a proposal and inserts it
+// into the cache. A VoteResults record should only be created for proposals
+// once the voting period has ended.
+func (d *decred) newVoteResults(token string) error {
+	log.Tracef("newVoteResults %v", token)
+
+	// Lookup start vote
+	var sv StartVote
+	err := d.recordsdb.
+		Where("token = ?", token).
+		Preload("Options").
+		Find(&sv).
+		Error
+	if err != nil {
+		return fmt.Errorf("lookup start vote: %v", err)
+	}
+
+	// Lookup cast votes
+	var cv []CastVote
+	err = d.recordsdb.
+		Where("token = ?", token).
+		Find(&cv).
+		Error
+	if err == gorm.ErrRecordNotFound {
+		// No cast votes exists. In theory, this could
+		// happen if no one were to vote on a proposal.
+		// In practice, this shouldn't happen.
+	} else if err != nil {
+		return fmt.Errorf("lookup cast votes: %v", err)
+	}
+
+	// Tally cast votes
+	tally := make(map[string]uint64) // [voteBit]voteCount
+	for _, v := range cv {
+		tally[v.VoteBit]++
+	}
+
+	// Create vote option results
+	results := make([]VoteOptionResult, 0, len(sv.Options))
+	for _, v := range sv.Options {
+		voteBit := strconv.FormatUint(v.Bits, 16)
+		voteCount := tally[voteBit]
+
+		results = append(results, VoteOptionResult{
+			Key:    token + voteBit,
+			Votes:  voteCount,
+			Option: v,
+		})
+	}
+
+	// Check whether vote was approved
+	var total uint64
+	for _, v := range results {
+		total += v.Votes
+	}
+
+	eligible := len(strings.Split(sv.EligibleTickets, ","))
+	quorum := uint64(float64(sv.QuorumPercentage) / 100 * float64(eligible))
+	pass := uint64(float64(sv.PassPercentage) / 100 * float64(total))
+
+	// XXX: this only supports proposals with yes/no
+	// voting options. Multiple voting option support
+	// will need to be added in the future.
+	var approvedVotes uint64
+	for _, v := range results {
+		if v.Option.ID == voteOptionIDApproved {
+			approvedVotes = v.Votes
+		}
+	}
+
+	var approved bool
+	switch {
+	case total < quorum:
+		// Quorum not met
+	case approvedVotes < pass:
+		// Pass percentage not met
+	default:
+		// Vote was approved
+		approved = true
+	}
+
+	// Create a vote results entry
+	err = d.recordsdb.Create(&VoteResults{
+		Token:    token,
+		Approved: approved,
+		Results:  results,
+	}).Error
+	if err != nil {
+		return fmt.Errorf("new vote results: %v", err)
+	}
+
+	return nil
+}
+
+// cmdLoadVoteResults creates vote results entries for any proposals that have
+// a finished voting period but have not yet been added to the vote results
+// table. The vote results table is lazy loaded.
+func (d *decred) cmdLoadVoteResults(payload string) (string, error) {
+	log.Tracef("cmdLoadVoteResults")
+
+	lvs, err := decredplugin.DecodeLoadVoteResults([]byte(payload))
+	if err != nil {
+		return "", err
+	}
+
+	// Find proposals that have a finished voting period but
+	// have not yet been added to the vote results table.
+	q := `SELECT start_votes.token
+        FROM start_votes
+        LEFT OUTER JOIN vote_results
+          ON start_votes.token = vote_results.token
+          WHERE start_votes.end_height <= ?
+          AND vote_results.token IS NULL`
+	rows, err := d.recordsdb.Raw(q, lvs.BestBlock).Rows()
+	if err != nil {
+		return "", fmt.Errorf("no vote results: %v", err)
+	}
+	defer rows.Close()
+
+	var token string
+	tokens := make([]string, 0, 1024)
+	for rows.Next() {
+		rows.Scan(&token)
+		tokens = append(tokens, token)
+	}
+
+	// Create vote result entries
+	for _, v := range tokens {
+		err := d.newVoteResults(v)
+		if err != nil {
+			return "", fmt.Errorf("newVoteResults %v: %v", v, err)
+		}
+	}
+
+	// Prepare reply
+	r := decredplugin.LoadVoteResultsReply{}
+	reply, err := decredplugin.EncodeLoadVoteResultsReply(r)
+	if err != nil {
+		return "", err
+	}
+
+	return string(reply), nil
+}
+
+// cmdTokenInventory returns the tokens of all records in the cache,
+// categorized by stage of the voting process.
+func (d *decred) cmdTokenInventory(payload string) (string, error) {
+	log.Tracef("decred cmdTokenInventory")
+
+	ti, err := decredplugin.DecodeTokenInventory([]byte(payload))
+	if err != nil {
+		return "", err
+	}
+
+	// The token inventory call cannot be completed if there
+	// are any proposals that have finished voting but that
+	// don't have an entry in the vote results table yet.
+	// Fail here if any are found.
+	q := `SELECT start_votes.token
+        FROM start_votes
+        LEFT OUTER JOIN vote_results
+          ON start_votes.token = vote_results.token
+          WHERE start_votes.end_height <= ?
+          AND vote_results.token IS NULL`
+	rows, err := d.recordsdb.Raw(q, ti.BestBlock).Rows()
+	if err != nil {
+		return "", fmt.Errorf("no vote results: %v", err)
+	}
+	defer rows.Close()
+
+	var token string
+	missing := make([]string, 0, 1024)
+	for rows.Next() {
+		rows.Scan(&token)
+		missing = append(missing, token)
+	}
+
+	if len(missing) > 0 {
+		// Return a ErrRecordNotFound to indicate one
+		// or more vote result records were not found.
+		return "", cache.ErrRecordNotFound
+	}
+
+	// Pre voting period tokens. This query returns the
+	// tokens of the most recent version of all records that
+	// are public and do not have an associated StartVote
+	// record, ordered by timestamp in descending order.
+	q = `SELECT a.token
+        FROM records a
+        LEFT OUTER JOIN start_votes
+          ON a.token = start_votes.token
+        LEFT OUTER JOIN records b
+          ON a.token = b.token
+          AND a.version < b.version
+        WHERE b.token IS NULL
+          AND start_votes.token IS NULL
+          AND a.status = ?
+        ORDER BY a.timestamp DESC`
+	rows, err = d.recordsdb.Raw(q, pd.RecordStatusPublic).Rows()
+	if err != nil {
+		return "", fmt.Errorf("pre: %v", err)
+	}
+	defer rows.Close()
+
+	pre := make([]string, 0, 1024)
+	for rows.Next() {
+		rows.Scan(&token)
+		pre = append(pre, token)
+	}
+
+	// Active voting period tokens
+	q = `SELECT token
+       FROM start_votes
+       WHERE end_height > ?
+       ORDER BY end_height DESC`
+	rows, err = d.recordsdb.Raw(q, ti.BestBlock).Rows()
+	if err != nil {
+		return "", fmt.Errorf("active: %v", err)
+	}
+	defer rows.Close()
+
+	active := make([]string, 0, 1024)
+	for rows.Next() {
+		rows.Scan(&token)
+		active = append(active, token)
+	}
+
+	// Approved vote tokens
+	q = `SELECT vote_results.token
+       FROM vote_results
+       INNER JOIN start_votes
+         ON vote_results.token = start_votes.token
+         WHERE vote_results.approved = true
+       ORDER BY start_votes.start_block_height DESC`
+	rows, err = d.recordsdb.Raw(q).Rows()
+	if err != nil {
+		return "", fmt.Errorf("approved: %v", err)
+	}
+	defer rows.Close()
+
+	approved := make([]string, 0, 1024)
+	for rows.Next() {
+		rows.Scan(&token)
+		approved = append(approved, token)
+	}
+
+	// Rejected vote tokens
+	q = `SELECT vote_results.token
+       FROM vote_results
+       INNER JOIN start_votes
+         ON vote_results.token = start_votes.token
+         WHERE vote_results.approved = false
+       ORDER BY start_votes.start_block_height DESC`
+	rows, err = d.recordsdb.Raw(q).Rows()
+	if err != nil {
+		return "", fmt.Errorf("rejected: %v", err)
+	}
+	defer rows.Close()
+
+	rejected := make([]string, 0, 1024)
+	for rows.Next() {
+		rows.Scan(&token)
+		rejected = append(rejected, token)
+	}
+
+	// Abandoned tokens
+	abandoned := make([]string, 0, 1024)
+	q = `SELECT token
+       FROM records
+       WHERE status = ?
+       ORDER BY timestamp DESC`
+	rows, err = d.recordsdb.Raw(q, pd.RecordStatusArchived).Rows()
+	if err != nil {
+		return "", fmt.Errorf("abandoned: %v", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		rows.Scan(&token)
+		abandoned = append(abandoned, token)
+	}
+
+	// Prepare reply
+	reply, err := decredplugin.EncodeTokenInventoryReply(
+		decredplugin.TokenInventoryReply{
+			Pre:       pre,
+			Active:    active,
+			Approved:  approved,
+			Rejected:  rejected,
+			Abandoned: abandoned,
+		})
+	if err != nil {
+		return "", err
+	}
+
+	return string(reply), nil
+}
+
+func (d *decred) cmdVoteSummary(payload string) (string, error) {
+	log.Tracef("cmdVoteSummary")
+
+	vs, err := decredplugin.DecodeVoteSummary([]byte(payload))
+	if err != nil {
+		return "", err
+	}
+
+	// Lookup the most recent record version
+	var r Record
+	err = d.recordsdb.
+		Where("records.token = ?", vs.Token).
+		Order("records.version desc").
+		Limit(1).
+		Find(&r).
+		Error
+	if err != nil {
+		if err == gorm.ErrRecordNotFound {
+			err = cache.ErrRecordNotFound
+		}
+		return "", err
+	}
+
+	// Declare here to prevent goto errors
+	results := make([]decredplugin.VoteOptionResult, 0, 16)
+	var (
+		av AuthorizeVote
+		sv StartVote
+		vr VoteResults
+	)
+
+	// Lookup authorize vote
+	key := vs.Token + strconv.FormatUint(r.Version, 10)
+	err = d.recordsdb.
+		Where("key = ?", key).
+		Find(&av).
+		Error
+	if err == gorm.ErrRecordNotFound {
+		// If an authorize vote doesn't exist
+		// then there is no need to continue.
+		goto sendReply
+	} else if err != nil {
+		return "", fmt.Errorf("lookup authorize vote: %v", err)
+	}
+
+	// Lookup start vote
+	err = d.recordsdb.
+		Where("token = ?", vs.Token).
+		Preload("Options").
+		Find(&sv).
+		Error
+	if err == gorm.ErrRecordNotFound {
+		// If an start vote doesn't exist then
+		// there is no need to continue.
+		goto sendReply
+	} else if err != nil {
+		return "", fmt.Errorf("lookup start vote: %v", err)
+	}
+
+	// Lookup vote results
+	err = d.recordsdb.
+		Where("token = ?", vs.Token).
+		Preload("Results").
+		Find(&vr).
+		Error
+	if err == gorm.ErrRecordNotFound {
+		// A vote results record was not found. This means that
+		// the vote is either still active or has not been lazy
+		// loaded yet. The vote results will need to be looked
+		// up manually.
+	} else if err != nil {
+		return "", fmt.Errorf("lookup vote results: %v", err)
+	} else {
+		// Vote results record exists. We have all of the data
+		// that we need to send the reply.
+		vor := convertVoteOptionResultsToDecred(vr.Results)
+		results = append(results, vor...)
+		goto sendReply
+	}
+
+	// Lookup vote results manually
+	for _, v := range sv.Options {
+		var votes uint64
+		tokenVoteBit := v.Token + strconv.FormatUint(v.Bits, 16)
+		err := d.recordsdb.
+			Model(&CastVote{}).
+			Where("token_vote_bit = ?", tokenVoteBit).
+			Count(&votes).
+			Error
+		if err != nil {
+			return "", fmt.Errorf("count cast votes: %v", err)
+		}
+
+		results = append(results,
+			decredplugin.VoteOptionResult{
+				ID:          v.ID,
+				Description: v.Description,
+				Bits:        v.Bits,
+				Votes:       votes,
+			})
+	}
+
+sendReply:
+	// Return "" not "0" if end height doesn't exist
+	var endHeight string
+	if sv.EndHeight != 0 {
+		endHeight = strconv.FormatUint(sv.EndHeight, 10)
+	}
+
+	vsr := decredplugin.VoteSummaryReply{
+		Authorized:          (av.Action == decredplugin.AuthVoteActionAuthorize),
+		EndHeight:           endHeight,
+		EligibleTicketCount: sv.EligibleTicketCount,
+		QuorumPercentage:    sv.QuorumPercentage,
+		PassPercentage:      sv.PassPercentage,
+		Results:             results,
+	}
+	reply, err := decredplugin.EncodeVoteSummaryReply(vsr)
+	if err != nil {
+		return "", err
+	}
+
+	return string(reply), nil
+}
+
 // Exec executes a decred plugin command.  Plugin commands that write data to
 // the cache require both the command payload and the reply payload.  Plugin
 // commands that fetch data from the cache require only the command payload.
@@ -553,18 +997,24 @@ func (d *decred) Exec(cmd, cmdPayload, replyPayload string) (string, error) {
 		return d.cmdProposalCommentsLikes(cmdPayload)
 	case decredplugin.CmdInventory:
 		return d.cmdInventory()
+	case decredplugin.CmdLoadVoteResults:
+		return d.cmdLoadVoteResults(cmdPayload)
+	case decredplugin.CmdTokenInventory:
+		return d.cmdTokenInventory(cmdPayload)
+	case decredplugin.CmdVoteSummary:
+		return d.cmdVoteSummary(cmdPayload)
 	}
 
 	return "", cache.ErrInvalidPluginCmd
 }
 
-// createDecredTables creates the cache tables needed by the decred plugin if
-// they do not already exist. A decred plugin version record is inserted into
-// the database during table creation.
+// createTables creates the cache tables needed by the decred plugin if they do
+// not already exist. A decred plugin version record is inserted into the
+// database during table creation.
 //
 // This function must be called within a transaction.
-func createDecredTables(tx *gorm.DB) error {
-	log.Tracef("createDecredTables")
+func (d *decred) createTables(tx *gorm.DB) error {
+	log.Tracef("createTables")
 
 	// Create decred plugin tables
 	if !tx.HasTable(tableComments) {
@@ -603,6 +1053,18 @@ func createDecredTables(tx *gorm.DB) error {
 			return err
 		}
 	}
+	if !tx.HasTable(tableVoteOptionResults) {
+		err := tx.CreateTable(&VoteOptionResult{}).Error
+		if err != nil {
+			return err
+		}
+	}
+	if !tx.HasTable(tableVoteResults) {
+		err := tx.CreateTable(&VoteResults{}).Error
+		if err != nil {
+			return err
+		}
+	}
 
 	// Check if a decred version record exists. Insert one
 	// if no version record is found.
@@ -612,9 +1074,7 @@ func createDecredTables(tx *gorm.DB) error {
 	}
 
 	var v Version
-	err := tx.Where("id = ?", decredplugin.ID).
-		Find(&v).
-		Error
+	err := tx.Where("id = ?", decredplugin.ID).Find(&v).Error
 	if err == gorm.ErrRecordNotFound {
 		err = tx.Create(
 			&Version{
@@ -627,23 +1087,62 @@ func createDecredTables(tx *gorm.DB) error {
 	return err
 }
 
-// build the decred plugin cache using the passed in inventory.
+// droptTables drops all decred plugin tables from the cache and remove the
+// decred plugin version record.
 //
 // This function must be called within a transaction.
-func (d *decred) build(tx *gorm.DB, ir *decredplugin.InventoryReply) error {
-	log.Tracef("decred build")
-
-	// Create the database tables
-	err := createDecredTables(tx)
+func (d *decred) dropTables(tx *gorm.DB) error {
+	// Drop decred plugin tables
+	err := tx.DropTableIfExists(tableComments, tableCommentLikes,
+		tableCastVotes, tableAuthorizeVotes, tableVoteOptions,
+		tableStartVotes, tableVoteOptionResults, tableVoteResults).
+		Error
 	if err != nil {
-		return fmt.Errorf("createDecredTables: %v", err)
+		return err
 	}
 
-	// Build comments cache. Comments that have been censored will
-	// be marked as censored.
+	// Remove decred plugin version record
+	return tx.Delete(&Version{
+		ID: decredplugin.ID,
+	}).Error
+}
+
+// build the decred plugin cache using the passed in inventory.
+//
+// This function cannot be called using a transaction because it could
+// potentially exceed cockroachdb's transaction size limit.
+func (d *decred) build(ir *decredplugin.InventoryReply) error {
+	log.Tracef("decred build")
+
+	// Drop all decred plugin tables
+	tx := d.recordsdb.Begin()
+	err := d.dropTables(tx)
+	if err != nil {
+		tx.Rollback()
+		return fmt.Errorf("drop tables: %v", err)
+	}
+	err = tx.Commit().Error
+	if err != nil {
+		return err
+	}
+
+	// Create decred plugin tables
+	tx = d.recordsdb.Begin()
+	err = d.createTables(tx)
+	if err != nil {
+		tx.Rollback()
+		return fmt.Errorf("create tables: %v", err)
+	}
+	err = tx.Commit().Error
+	if err != nil {
+		return err
+	}
+
+	// Build comments cache
+	log.Tracef("decred: building comments cache")
 	for _, v := range ir.Comments {
 		c := convertCommentFromDecred(v)
-		err := d.newComment(tx, c)
+		err := d.newComment(d.recordsdb, c)
 		if err != nil {
 			log.Debugf("newComment failed on '%v'", c)
 			return fmt.Errorf("newComment: %v", err)
@@ -651,9 +1150,10 @@ func (d *decred) build(tx *gorm.DB, ir *decredplugin.InventoryReply) error {
 	}
 
 	// Build like comments cache
+	log.Tracef("decred: building like comments cache")
 	for _, v := range ir.LikeComments {
 		lc := convertLikeCommentFromDecred(v)
-		err := d.newLikeComment(tx, lc)
+		err := d.newLikeComment(d.recordsdb, lc)
 		if err != nil {
 			log.Debugf("newLikeComment failed on '%v'", lc)
 			return fmt.Errorf("newLikeComment: %v", err)
@@ -668,14 +1168,23 @@ func (d *decred) build(tx *gorm.DB, ir *decredplugin.InventoryReply) error {
 	}
 
 	// Build authorize vote cache
+	log.Tracef("decred: building authorize vote cache")
 	for _, v := range ir.AuthorizeVotes {
 		r, ok := avr[v.Receipt]
 		if !ok {
-			return fmt.Errorf("AuthorizeVoteReply not found %v", v.Token)
+			return fmt.Errorf("AuthorizeVoteReply not found %v",
+				v.Token)
 		}
 
-		av := convertAuthorizeVoteFromDecred(v, r)
-		err := d.newAuthorizeVote(tx, av)
+		rv, err := strconv.ParseUint(r.RecordVersion, 10, 64)
+		if err != nil {
+			log.Debugf("newAuthorizeVote failed on '%v'", r)
+			return fmt.Errorf("parse version '%v' failed: %v",
+				r.RecordVersion, err)
+		}
+
+		av := convertAuthorizeVoteFromDecred(v, r, rv)
+		err = d.newAuthorizeVote(d.recordsdb, av)
 		if err != nil {
 			log.Debugf("newAuthorizeVote failed on '%v'", av)
 			return fmt.Errorf("newAuthorizeVote: %v", err)
@@ -683,9 +1192,18 @@ func (d *decred) build(tx *gorm.DB, ir *decredplugin.InventoryReply) error {
 	}
 
 	// Build start vote cache
+	log.Tracef("decred: building start vote cache")
 	for _, v := range ir.StartVoteTuples {
-		sv := convertStartVoteFromDecred(v.StartVote, v.StartVoteReply)
-		err := d.newStartVote(tx, sv)
+		endHeight, err := strconv.ParseUint(v.StartVoteReply.EndHeight, 10, 64)
+		if err != nil {
+			log.Debugf("newStartVote failed on '%v'", v)
+			return fmt.Errorf("parse end height '%v': %v",
+				v.StartVoteReply.EndHeight, err)
+		}
+
+		sv := convertStartVoteFromDecred(v.StartVote,
+			v.StartVoteReply, endHeight)
+		err = d.newStartVote(d.recordsdb, sv)
 		if err != nil {
 			log.Debugf("newStartVote failed on '%v'", sv)
 			return fmt.Errorf("newStartVote: %v", err)
@@ -693,9 +1211,10 @@ func (d *decred) build(tx *gorm.DB, ir *decredplugin.InventoryReply) error {
 	}
 
 	// Build cast vote cache
+	log.Tracef("decred: building cast vote cache")
 	for _, v := range ir.CastVotes {
 		cv := convertCastVoteFromDecred(v)
-		err := d.newCastVote(tx, cv)
+		err := d.newCastVote(d.recordsdb, cv)
 		if err != nil {
 			log.Debugf("newCastVote failed on '%v'", cv)
 			return fmt.Errorf("newCastVote: %v", err)
@@ -717,31 +1236,33 @@ func (d *decred) Build(payload string) error {
 		return fmt.Errorf("DecodeInventoryReply: %v", err)
 	}
 
-	// Drop all decred plugin tables
-	err = d.recordsdb.DropTableIfExists(tableComments,
-		tableCommentLikes, tableCastVotes, tableAuthorizeVotes,
-		tableVoteOptions, tableStartVotes).Error
+	// Build the decred plugin cache. This is not run using
+	// a transaction because it could potentially exceed
+	// cockroachdb's transaction size limit.
+	err = d.build(ir)
 	if err != nil {
-		return fmt.Errorf("drop decred tables failed: %v", err)
+		// Remove the version record. This will
+		// force a rebuild on the next start up.
+		err1 := d.recordsdb.Delete(&Version{
+			ID: decredplugin.ID,
+		}).Error
+		if err1 != nil {
+			panic("the cache is out of sync and will not rebuild" +
+				"automatically; a rebuild must be forced")
+		}
 	}
 
-	// Build the decred plugin cache from scratch
-	tx := d.recordsdb.Begin()
-	err = d.build(tx, ir)
-	if err != nil {
-		tx.Rollback()
-		return err
-	}
-
-	return tx.Commit().Error
+	return err
 }
 
 // Setup creates the decred plugin tables if they do not already exist.  A
 // decred plugin version record is inserted into the database during table
 // creation.
 func (d *decred) Setup() error {
+	log.Tracef("decred: Setup")
+
 	tx := d.recordsdb.Begin()
-	err := createDecredTables(tx)
+	err := d.createTables(tx)
 	if err != nil {
 		tx.Rollback()
 		return err
@@ -754,33 +1275,32 @@ func (d *decred) Setup() error {
 // if one exists, and checks that it matches the version of the current decred
 // plugin cache implementation.
 func (d *decred) CheckVersion() error {
+	log.Tracef("decred: CheckVersion")
+
 	// Sanity check. Ensure version table exists.
 	if !d.recordsdb.HasTable(tableVersions) {
 		return fmt.Errorf("versions table not found")
 	}
 
-	// Lookup version record
+	// Lookup version record. If the version is not found or
+	// if there is a version mismatch, return an error so
+	// that the decred plugin cache can be built/rebuilt.
 	var v Version
 	err := d.recordsdb.
 		Where("id = ?", decredplugin.ID).
 		Find(&v).
 		Error
 	if err == gorm.ErrRecordNotFound {
-		// A version record not being found indicates that the
-		// decred plugin cache has not been built yet. Return a
-		// ErrWrongPluginVersion error so that the cache will be
-		// built.
-		return cache.ErrWrongPluginVersion
-	} else if err != nil {
-		return err
+		log.Debugf("version record not found for ID '%v'",
+			decredplugin.ID)
+		err = cache.ErrNoVersionRecord
+	} else if v.Version != decredVersion {
+		log.Debugf("version mismatch for ID '%v': got %v, want %v",
+			decredplugin.ID, v.Version, decredVersion)
+		err = cache.ErrWrongVersion
 	}
 
-	// Ensure we're using the correct version
-	if v.Version != decredVersion {
-		return cache.ErrWrongPluginVersion
-	}
-
-	return nil
+	return err
 }
 
 // newDecredPlugin returns a cache decred plugin context.

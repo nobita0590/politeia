@@ -5,6 +5,8 @@
 package cockroachdb
 
 import (
+	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/decred/politeia/decredplugin"
@@ -18,12 +20,15 @@ func convertMDStreamFromCache(ms cache.MetadataStream) MetadataStream {
 	}
 }
 
-func convertRecordFromCache(r cache.Record) Record {
-	metadata := make([]MetadataStream, 0, len(r.Metadata))
-	for _, ms := range r.Metadata {
-		metadata = append(metadata, convertMDStreamFromCache(ms))
+func convertMDStreamsFromCache(ms []cache.MetadataStream) []MetadataStream {
+	m := make([]MetadataStream, 0, len(ms))
+	for _, v := range ms {
+		m = append(m, convertMDStreamFromCache(v))
 	}
+	return m
+}
 
+func convertRecordFromCache(r cache.Record, version uint64) Record {
 	files := make([]File, 0, len(r.Files))
 	for _, f := range r.Files {
 		files = append(files,
@@ -38,12 +43,12 @@ func convertRecordFromCache(r cache.Record) Record {
 	return Record{
 		Key:       r.CensorshipRecord.Token + r.Version,
 		Token:     r.CensorshipRecord.Token,
-		Version:   r.Version,
+		Version:   version,
 		Status:    int(r.Status),
 		Timestamp: r.Timestamp,
 		Merkle:    r.CensorshipRecord.Merkle,
 		Signature: r.CensorshipRecord.Signature,
-		Metadata:  metadata,
+		Metadata:  convertMDStreamsFromCache(r.Metadata),
 		Files:     files,
 	}
 }
@@ -76,7 +81,7 @@ func convertRecordToCache(r Record) cache.Record {
 	}
 
 	return cache.Record{
-		Version:          r.Version,
+		Version:          strconv.FormatUint(r.Version, 10),
 		Status:           cache.RecordStatusT(r.Status),
 		Timestamp:        r.Timestamp,
 		CensorshipRecord: cr,
@@ -151,11 +156,11 @@ func convertLikeCommentToDecred(lc LikeComment) decredplugin.LikeComment {
 	}
 }
 
-func convertAuthorizeVoteFromDecred(av decredplugin.AuthorizeVote, avr decredplugin.AuthorizeVoteReply) AuthorizeVote {
+func convertAuthorizeVoteFromDecred(av decredplugin.AuthorizeVote, avr decredplugin.AuthorizeVoteReply, version uint64) AuthorizeVote {
 	return AuthorizeVote{
 		Key:       av.Token + avr.RecordVersion,
 		Token:     av.Token,
-		Version:   avr.RecordVersion,
+		Version:   version,
 		Action:    av.Action,
 		Signature: av.Signature,
 		PublicKey: av.PublicKey,
@@ -175,7 +180,7 @@ func convertAuthorizeVoteToDecred(av AuthorizeVote) decredplugin.AuthorizeVote {
 	}
 }
 
-func convertStartVoteFromDecred(sv decredplugin.StartVote, svr decredplugin.StartVoteReply) StartVote {
+func convertStartVoteFromDecred(sv decredplugin.StartVote, svr decredplugin.StartVoteReply, endHeight uint64) StartVote {
 	opts := make([]VoteOption, 0, len(sv.Vote.Options))
 	for _, v := range sv.Vote.Options {
 		opts = append(opts, VoteOption{
@@ -186,18 +191,19 @@ func convertStartVoteFromDecred(sv decredplugin.StartVote, svr decredplugin.Star
 		})
 	}
 	return StartVote{
-		Token:            sv.Vote.Token,
-		Mask:             sv.Vote.Mask,
-		Duration:         sv.Vote.Duration,
-		QuorumPercentage: sv.Vote.QuorumPercentage,
-		PassPercentage:   sv.Vote.PassPercentage,
-		Options:          opts,
-		PublicKey:        sv.PublicKey,
-		Signature:        sv.Signature,
-		StartBlockHeight: svr.StartBlockHeight,
-		StartBlockHash:   svr.StartBlockHash,
-		EndHeight:        svr.EndHeight,
-		EligibleTickets:  strings.Join(svr.EligibleTickets, ","),
+		Token:               sv.Vote.Token,
+		Mask:                sv.Vote.Mask,
+		Duration:            sv.Vote.Duration,
+		QuorumPercentage:    sv.Vote.QuorumPercentage,
+		PassPercentage:      sv.Vote.PassPercentage,
+		Options:             opts,
+		PublicKey:           sv.PublicKey,
+		Signature:           sv.Signature,
+		StartBlockHeight:    svr.StartBlockHeight,
+		StartBlockHash:      svr.StartBlockHash,
+		EndHeight:           endHeight,
+		EligibleTickets:     strings.Join(svr.EligibleTickets, ","),
+		EligibleTicketCount: len(svr.EligibleTickets),
 	}
 }
 
@@ -231,7 +237,7 @@ func convertStartVoteToDecred(sv StartVote) (decredplugin.StartVote, decredplugi
 	dsvr := decredplugin.StartVoteReply{
 		StartBlockHeight: sv.StartBlockHeight,
 		StartBlockHash:   sv.StartBlockHash,
-		EndHeight:        sv.EndHeight,
+		EndHeight:        fmt.Sprint(sv.EndHeight),
 		EligibleTickets:  tix,
 	}
 
@@ -240,10 +246,11 @@ func convertStartVoteToDecred(sv StartVote) (decredplugin.StartVote, decredplugi
 
 func convertCastVoteFromDecred(cv decredplugin.CastVote) CastVote {
 	return CastVote{
-		Token:     cv.Token,
-		Ticket:    cv.Ticket,
-		VoteBit:   cv.VoteBit,
-		Signature: cv.Signature,
+		Token:        cv.Token,
+		Ticket:       cv.Ticket,
+		VoteBit:      cv.VoteBit,
+		Signature:    cv.Signature,
+		TokenVoteBit: cv.Token + cv.VoteBit,
 	}
 }
 
@@ -254,4 +261,21 @@ func convertCastVoteToDecred(cv CastVote) decredplugin.CastVote {
 		VoteBit:   cv.VoteBit,
 		Signature: cv.Signature,
 	}
+}
+
+func convertVoteOptionResultToDecred(r VoteOptionResult) decredplugin.VoteOptionResult {
+	return decredplugin.VoteOptionResult{
+		ID:          r.Option.ID,
+		Description: r.Option.Description,
+		Bits:        r.Option.Bits,
+		Votes:       r.Votes,
+	}
+}
+
+func convertVoteOptionResultsToDecred(r []VoteOptionResult) []decredplugin.VoteOptionResult {
+	results := make([]decredplugin.VoteOptionResult, 0, len(r))
+	for _, v := range r {
+		results = append(results, convertVoteOptionResultToDecred(v))
+	}
+	return results
 }
